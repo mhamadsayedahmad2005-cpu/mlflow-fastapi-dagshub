@@ -43,16 +43,19 @@ jobs:
       - name: Smoke test
         run: |
           docker run -d --name api -p 8000:8000 "$IMAGE_NAME:latest"
+          PAYLOAD=$(python3 -c 'import json; print(json.dumps({"features": [0.0]*64}))')
           for i in $(seq 1 30); do
-            curl -s -o /dev/null -X POST localhost:8000/predict && break
+            if RESPONSE=$(curl -sf -X POST localhost:8000/predict -H 'Content-Type: application/json' -d "$PAYLOAD"); then
+              echo "Response: $RESPONSE"
+              echo "$RESPONSE" | grep -q '"prediction"'
+              docker rm -f api
+              exit 0
+            fi
             sleep 1
           done
-          PAYLOAD=$(python3 -c 'import json; print(json.dumps({"features": [0.0]*64}))')
-          RESPONSE=$(curl -sf -X POST localhost:8000/predict -H 'Content-Type: application/json' -d "$PAYLOAD")
-          echo "Response: $RESPONSE"
-          echo "$RESPONSE" | grep -q '"prediction"'
+          echo "Smoke test failed. Container logs:"
           docker logs api
-          docker rm -f api
+          exit 1
 
       # 3. Publish to GitHub Container Registry (main branch only)
       - name: Log in to GHCR
