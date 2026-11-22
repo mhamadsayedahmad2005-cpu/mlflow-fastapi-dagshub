@@ -1,0 +1,80 @@
+name: Build and publish model API
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:        # re-run manually after training a new model
+  schedule:
+    - cron: "0 3 * * *"     # optional: nightly rebuild to pick up the latest model
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lowercase image name
+        run: echo "IMAGE_NAME=${IMAGE_NAME,,}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # 1. Build (this step downloads the latest model from DagsHub) and load locally
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:latest
+          build-args: |
+            MLFLOW_TRACKING_URI=${{ vars.MLFLOW_TRACKING_URI }}
+            MLFLOW_EXPERIMENT_NAME=${{ vars.MLFLOW_EXPERIMENT_NAME || 'RandomForest_V1.0.1' }}
+            CACHE_BUST=${{ github.run_id }}-${{ github.run_attempt }}
+          secrets: |
+            dagshub_token=${{ secrets.DAGSHUB_TOKEN }}
+
+      # 2. Smoke test the /predict endpoint
+      - name: Smoke test
+        run: |
+          docker run -d --name api -p 8000:8000 "$IMAGE_NAME:latest"
+          for i in $(seq 1 30); do
+            curl -s -o /dev/null -X POST localhost:8000/predict && break
+            sleep 1
+          done
+          PAYLOAD=$(python3 -c 'import json; print(json.dumps({"features": [0.0]*64}))')
+          RESPONSE=$(curl -sf -X POST localhost:8000/predict -H 'Content-Type: application/json' -d "$PAYLOAD")
+          echo "Response: $RESPONSE"
+          echo "$RESPONSE" | grep -q '"prediction"'
+          docker logs api
+          docker rm -f api
+
+      # 3. Publish to GitHub Container Registry (main branch only)
+      - name: Log in to GHCR
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        if: github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          build-args: |
+            MLFLOW_TRACKING_URI=${{ vars.MLFLOW_TRACKING_URI }}
+            MLFLOW_EXPERIMENT_NAME=${{ vars.MLFLOW_EXPERIMENT_NAME || 'RandomForest_V1.0.1' }}
+            CACHE_BUST=${{ github.run_id }}-${{ github.run_attempt }}
+          secrets: |
+            dagshub_token=${{ secrets.DAGSHUB_TOKEN }}
